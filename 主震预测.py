@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 from scipy.stats import poisson, uniform, norm
+import sys
 
 # ------- Step 1: Parameters and Input Data -------
 
@@ -13,7 +14,8 @@ region_bounds = {
     'depth_min': 5, 'depth_max': 20
 }
 magnitude_range = [5.0, 7.0]
-num_simulations = 10000
+num_simulations = 100  # Reduced from 10000 for faster testing; increase for production
+# num_simulations = 10000  # Original value for full analysis
 
 # Seismic mechanism proportions (example: strike-slip 0.6, normal 0.2, reverse 0.2)
 mechanism_probs = {
@@ -86,7 +88,10 @@ def gmpe_spectrum(event, period_arr):
 periods = np.array([0.01, 0.2, 0.5, 1.0, 2.0, 3.0])  # s, can be extended (0.01s for PGA)
 all_sa = np.zeros((num_simulations, len(periods)))
 
+print(f"Starting Monte Carlo simulation with {num_simulations} realizations...")
 for sim in range(num_simulations):
+    if (sim + 1) % max(1, num_simulations // 10) == 0:
+        print(f"  Progress: {sim + 1}/{num_simulations} ({100 * (sim + 1) / num_simulations:.1f}%)", flush=True)
     event_df = simulate_earthquakes()
     sa_max = np.zeros(len(periods))
     for idx, event in event_df.iterrows():
@@ -94,26 +99,33 @@ for sim in range(num_simulations):
         if source_type == 'mixed':
             # select rupture point randomly
             rlon, rlat = simulate_rupture(event)
+            # Create a new Series with updated lon, lat
             event = event.copy()
-            event['lon'], event['lat'] = rlon, rlat
+            event.loc['lon'] = rlon
+            event.loc['lat'] = rlat
         sa = gmpe_spectrum(event, periods)
         sa_max = np.maximum(sa_max, sa)  # Record maximum shaking in this simulation
     all_sa[sim, :] = sa_max
+print("Simulation completed!")
 
 # ------- Step 6: UHS Calculation (10% PE in 50 years) -------
 
+print("Computing Uniform Hazard Spectrum (UHS)...")
 pe_target = 0.10  # exceedance probability in 50 years
 sa_uhs = []
 for i, p in enumerate(periods):
     # Get the value exceeded by pe_target simulations
     sa_sorted = np.sort(all_sa[:, i])[::-1]  # descending order
     index = int(pe_target * num_simulations)
+    # Ensure index is within bounds
+    index = min(index, len(sa_sorted) - 1)
     sa_uhs.append(sa_sorted[index])
 sa_uhs = np.array(sa_uhs)
+print("UHS computed.")
 
 # ------- Step 7: Conditional Mean Spectrum (CMS) -------
 
-def calculate_cms(all_sa, periods, target_period_idx):
+def calculate_cms(all_sa, periods, sa_uhs, target_period_idx):
     """
     For a target control period, compute CMS: the mean spectrum conditional on the selected SA at that period.
     """
@@ -132,12 +144,19 @@ def calculate_cms(all_sa, periods, target_period_idx):
     return cms
 
 target_period_idx = 2  # e.g., T=0.5s, can be changed
-cms_spectrum = calculate_cms(all_sa, periods, target_period_idx)
+cms_spectrum = calculate_cms(all_sa, periods, sa_uhs, target_period_idx)
 
 # ------- Step 8: Output Results -------
 
-print('Uniform Hazard Spectrum (UHS) at 10% PE in 50 years:', dict(zip(periods, sa_uhs)))
-print('Conditional Mean Spectrum (CMS) at T=%.2fs:' % periods[target_period_idx], dict(zip(periods, cms_spectrum)))
+print('\n' + '='*60)
+print('Uniform Hazard Spectrum (UHS) at 10% PE in 50 years:')
+for i, p in enumerate(periods):
+    print(f'  T = {p:.2f}s: SA = {sa_uhs[i]:.6f}')
+print('='*60)
+print(f'\nConditional Mean Spectrum (CMS) at T={periods[target_period_idx]:.2f}s:')
+for i, p in enumerate(periods):
+    print(f'  T = {p:.2f}s: SA = {cms_spectrum[i]:.6f}')
+print('='*60)
 
 # The arrays `sa_uhs` and `cms_spectrum` can now be used to select or scale time histories for seismic analysis.
 
