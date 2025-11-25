@@ -14,16 +14,6 @@ from collections import defaultdict
 import warnings
 warnings.filterwarnings('ignore')
 
-# 尝试导入 matplotlib，用于可视化
-try:
-    import matplotlib.pyplot as plt
-    import matplotlib
-    matplotlib.use('Agg')  # 使用非交互式后端
-    HAS_MATPLOTLIB = True
-except ImportError:
-    HAS_MATPLOTLIB = False
-    print("警告: matplotlib 未安装，将跳过图形绘制功能")
-
 # 处理 Windows 控制台编码问题
 if sys.platform == 'win32':
     import io
@@ -367,135 +357,6 @@ def simple_ground_motion_model(frequency: float, magnitude: float, distance: flo
 
 
 # ============================================================================
-# CSV 数据导出函数
-# ============================================================================
-
-def plot_acceleration_spectrum(frequencies: List[float], 
-                                accelerations: List[float],
-                                event_info: Dict,
-                                output_filename: str = "加速度谱.png") -> bool:
-    """
-    绘制加速度谱图
-    
-    参数:
-    frequencies (List[float]): 频率数组 (Hz)
-    accelerations (List[float]): 加速度谱值 (cm/s^2)
-    event_info (Dict): 地震事件信息（包含 magnitude, distance, depth 等）
-    output_filename (str): 输出图片文件名
-    
-    返回:
-    bool: 是否成功绘制
-    """
-    
-    if not HAS_MATPLOTLIB:
-        print("⚠ matplotlib 未安装，无法绘制图形")
-        return False
-    
-    try:
-        fig, ax = plt.subplots(figsize=(12, 7))
-        
-        # 绘制加速度谱曲线
-        ax.loglog(frequencies, accelerations, 'b-', linewidth=2.5, label='加速度谱')
-        ax.scatter(frequencies[::5], accelerations[::5], c='red', s=40, zorder=5, alpha=0.6, label='采样点')
-        
-        # 设置标题和标签
-        mag = event_info.get('magnitude', 0)
-        dist = event_info.get('distance', 0)
-        depth = event_info.get('depth', 0)
-        
-        title = f"地震加速度反应谱\nM{mag:.2f}, 震源距 {dist:.1f}km, 深度 {depth:.1f}km"
-        ax.set_title(title, fontsize=14, fontweight='bold', pad=15)
-        
-        ax.set_xlabel('频率 (Hz)', fontsize=12, fontweight='bold')
-        ax.set_ylabel('加速度谱 (cm/s²)', fontsize=12, fontweight='bold')
-        
-        # 设置网格
-        ax.grid(True, which='both', alpha=0.3, linestyle='--')
-        ax.grid(True, which='major', alpha=0.5, linestyle='-')
-        
-        # 设置坐标轴范围
-        ax.set_xlim(frequencies[0], frequencies[-1])
-        ax.set_ylim(min(accelerations) * 0.1, max(accelerations) * 10)
-        
-        # 添加图例
-        ax.legend(loc='upper right', fontsize=11, framealpha=0.9)
-        
-        # 添加背景颜色
-        ax.set_facecolor('#f8f9fa')
-        fig.patch.set_facecolor('white')
-        
-        plt.tight_layout()
-        plt.savefig(output_filename, dpi=150, bbox_inches='tight')
-        plt.close()
-        
-        print(f"✓ 加速度谱图已保存: {output_filename}")
-        return True
-        
-    except Exception as e:
-        print(f"✗ 绘制加速度谱失败: {str(e)}")
-        return False
-
-
-def plot_multiple_spectra(frequency_magnitude_pairs: List[Tuple[List[float], List[float], Dict]],
-                          output_filename: str = "多事件加速度谱对比.png") -> bool:
-    """
-    绘制多条加速度谱对比图
-    
-    参数:
-    frequency_magnitude_pairs: 列表，每个元素为 (frequencies, accelerations, event_info)
-    output_filename: 输出图片文件名
-    
-    返回:
-    bool: 是否成功绘制
-    """
-    
-    if not HAS_MATPLOTLIB:
-        print("⚠ matplotlib 未安装，无法绘制图形")
-        return False
-    
-    try:
-        fig, ax = plt.subplots(figsize=(14, 8))
-        
-        colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd']
-        
-        # 绘制多条曲线
-        for idx, (frequencies, accelerations, event_info) in enumerate(frequency_magnitude_pairs):
-            mag = event_info.get('magnitude', 0)
-            dist = event_info.get('distance', 0)
-            label = f"M{mag:.2f}, 距离{dist:.0f}km"
-            
-            color = colors[idx % len(colors)]
-            ax.loglog(frequencies, accelerations, linewidth=2.5, label=label, color=color, marker='o', 
-                     markersize=3, markevery=10, alpha=0.8)
-        
-        # 设置标题和标签
-        ax.set_title('多事件地震加速度反应谱对比', fontsize=14, fontweight='bold', pad=15)
-        ax.set_xlabel('频率 (Hz)', fontsize=12, fontweight='bold')
-        ax.set_ylabel('加速度谱 (cm/s²)', fontsize=12, fontweight='bold')
-        
-        # 设置网格
-        ax.grid(True, which='both', alpha=0.3, linestyle='--')
-        ax.grid(True, which='major', alpha=0.5, linestyle='-')
-        
-        # 添加图例
-        ax.legend(loc='upper right', fontsize=11, framealpha=0.95, ncol=2)
-        
-        # 背景颜色
-        ax.set_facecolor('#f8f9fa')
-        fig.patch.set_facecolor('white')
-        
-        plt.tight_layout()
-        plt.savefig(output_filename, dpi=150, bbox_inches='tight')
-        plt.close()
-        
-        print(f"✓ 多事件对比图已保存: {output_filename}")
-        return True
-        
-    except Exception as e:
-        print(f"✗ 绘制对比图失败: {str(e)}")
-        return False
-
-
 # ============================================================================
 # CSV 数据导出函数
 # ============================================================================
@@ -747,77 +608,20 @@ def main():
     
     # 8.5 绘制加速度谱图形
     print("\n" + "=" * 70)
-    print("绘制加速度谱图形")
-    print("=" * 70)
-    
-    if HAS_MATPLOTLIB and results['simulations']:
-        sim = results['simulations'][0]
-        
-        if len(sim['occurrence_times']) > 0:
-            # 定义频率数组：0.1 到 10 Hz，间隔 0.1 Hz
-            frequencies = [round(0.1 + i * 0.1, 2) for i in range(100)]
-            
-            # 收集多个事件的加速度谱用于对比绘图
-            spectrum_data = []
-            
-            # 为每个事件绘制加速度谱
-            for event_idx in range(min(5, len(sim['occurrence_times']))):  # 最多绘制前 5 个
-                mag = sim['magnitudes'][event_idx]
-                lon = sim['longitudes'][event_idx]
-                lat = sim['latitudes'][event_idx]
-                depth = sim['depths'][event_idx]
-                
-                # 计算距离
-                station_lon = (region_bounds['lon_min'] + region_bounds['lon_max']) / 2
-                station_lat = (region_bounds['lat_min'] + region_bounds['lat_max']) / 2
-                
-                lat1_rad = math.radians(lat)
-                lon1_rad = math.radians(lon)
-                lat2_rad = math.radians(station_lat)
-                lon2_rad = math.radians(station_lon)
-                dlat = lat2_rad - lat1_rad
-                dlon = lon2_rad - lon1_rad
-                a = math.sin(dlat/2)**2 + math.cos(lat1_rad) * math.cos(lat2_rad) * math.sin(dlon/2)**2
-                c = 2 * math.asin(math.sqrt(a))
-                distance = 6371 * c
-                
-                # 计算加速度谱
-                accelerations = [simple_ground_motion_model(freq, mag, distance) for freq in frequencies]
-                
-                # 绘制单个事件的加速度谱
-                event_info = {'magnitude': mag, 'distance': distance, 'depth': depth}
-                plot_filename = f"加速度谱_事件{event_idx+1}.png"
-                plot_acceleration_spectrum(frequencies, accelerations, event_info, plot_filename)
-                
-                # 收集数据用于对比
-                spectrum_data.append((frequencies, accelerations, event_info))
-            
-            # 绘制多事件对比图
-            if len(spectrum_data) > 1:
-                plot_multiple_spectra(spectrum_data, "多事件加速度谱对比.png")
-            
-            print("✓ 所有加速度谱图形已生成完成")
-    elif not HAS_MATPLOTLIB:
-        print("⚠ matplotlib 未安装，跳过图形绘制")
-        print("  安装方法: pip install matplotlib")
-    print()
-    print("\n" + "=" * 70)
     print("✓ 纯 Python 版演示完成！")
     print("=" * 70)
     print("\n说明:")
     print("  这是一个不依赖 NumPy C 扩展的纯 Python 版本。")
     print("  可以验证代码逻辑是否正确，地震模型是否工作正常。")
-    print("  已集成 matplotlib 可视化功能，自动生成加速度谱图形。")
     print("\n生成的文件:")
-    print("  - 加速度谱_事件N.png: 单个事件的加速度谱图形")
-    print("  - 多事件加速度谱对比.png: 多个事件的加速度谱对比图")
     print("  - 地震动加速度谱.csv: 加速度谱数据")
     print("  - 地震事件汇总.csv: 地震事件列表")
-    print("\n建议的下一步:")
-    print("  1. 安装 matplotlib: pip install matplotlib")
-    print("  2. 运行本脚本自动生成加速度谱图形")
-    print("  3. 查看生成的 PNG 文件进行可视化分析")
-    print("  4. 若要完整版，安装 NumPy/SciPy 后运行原始版本")
+    print("\n可视化步骤:")
+    print("  1. 本脚本生成 CSV 数据文件")
+    print("  2. 使用独立工具进行可视化: python 可视化加速度谱.py")
+    print("  3. 生成的图形支持两种格式:")
+    print("     - PNG 格式 (matplotlib 模式，高精度)")
+    print("     - SVG 格式 (纯 Python 模式，无依赖)")
     print()
 
 
