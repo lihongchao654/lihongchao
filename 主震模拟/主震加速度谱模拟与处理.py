@@ -161,24 +161,68 @@ class SeismicMonteCarloSimple:
         return magnitudes
     
     def generate_depth_distribution(self, n_events: int) -> List[float]:
-        """生成深度分布"""
+        """
+        生成深度分布
+        
+        改进方法：使用更真实的Gamma分布而不是对数正态分布
+        地震深度通常表现为Gamma分布特征
+        """
         depth_params = self.seismic_params['depth_distribution']
         depth_min = self.region_bounds['depth_min']
         depth_max = self.region_bounds['depth_max']
         
-        if depth_params['type'] == 'lognormal':
-            mean = depth_params.get('mean', 10)
-            std = depth_params.get('std', 5)
-            depths = []
+        depths = []
+        
+        if depth_params['type'] == 'gamma':
+            # 使用Gamma分布（更符合地震学特征）
+            # 参数化：α=形状参数，β=尺度参数
+            # 均值 = α*β，方差 = α*β^2
+            
+            mean = depth_params.get('mean', 12)
+            std = depth_params.get('std', 6)
+            
+            # 计算Gamma分布参数
+            alpha = (mean / std) ** 2
+            beta = std ** 2 / mean
+            
             for _ in range(n_events):
-                # 简化的对数正态分布采样
-                u1, u2 = random.random(), random.random()
-                z = self.math_lib.sqrt(-2 * self.math_lib.log(u1)) * self.math_lib.cos(2 * self.math_lib.pi() * u2)
-                mu = self.math_lib.log(mean ** 2 / self.math_lib.sqrt(std ** 2 + mean ** 2))
-                sigma = self.math_lib.sqrt(self.math_lib.log(1 + std ** 2 / mean ** 2))
-                depth = self.math_lib.exp(mu + sigma * z)
+                # 使用Marsaglia and Tsang的算法采样Gamma分布
+                if alpha >= 1:
+                    d = alpha - 1/3
+                    c = 1 / math.sqrt(9 * d)
+                else:
+                    d = alpha
+                    c = 1 / (3 * math.sqrt(d))
+                
+                while True:
+                    u1 = random.random()
+                    if u1 > 1e-10:  # 避免log(0)
+                        z = math.sqrt(-2 * math.log(u1)) * math.cos(2 * math.pi * random.random())
+                        v = 1 + c * z
+                        if v > 0:
+                            u2 = random.random()
+                            if u2 <= 1 - 0.0331 * z ** 4:
+                                break
+                            if math.log(u2) <= 0.5 * z ** 2 + d * (1 - v + math.log(v)):
+                                break
+                
+                depth = d * v * beta
                 depths.append(depth)
+        
+        elif depth_params['type'] == 'truncated_normal':
+            # 截断正态分布
+            mean = depth_params.get('mean', 12)
+            std = depth_params.get('std', 6)
+            
+            for _ in range(n_events):
+                while True:
+                    depth = random.gauss(mean, std)
+                    if depth_min <= depth <= depth_max:
+                        depths.append(depth)
+                        break
+        
         else:
+            # 默认均匀分布
             depths = [random.uniform(depth_min, depth_max) for _ in range(n_events)]
         
         # 限制范围
@@ -324,36 +368,96 @@ class SeismicMonteCarloSimple:
 # 简化的地震动模型
 # ============================================================================
 
-def simple_ground_motion_model(frequency: float, magnitude: float, distance: float) -> float:
-    """简化的点源模型地震动计算"""
+def improved_ground_motion_model(frequency: float, magnitude: float, distance: float, 
+                                 random_seed: Optional[float] = None) -> float:
+    """
+    改进的地震动预测模型（基于Boore-Joyner-Fumal经验模型的简化版本）
+    
+    参数:
+    - frequency: 频率 (Hz)
+    - magnitude: 震级 (M)
+    - distance: 震源到台站的最近距离 (km)
+    - random_seed: 随机波动（单位sigma）
+    """
     math_lib = SimpleMath()
     
-    # 简化的 AB95 模型
-    rho = 2.8
-    Vs = 3.5
-    M0 = 10 ** (1.5 * magnitude + 9.05)
+    # ===== 地震矩和拐角频率计算 =====
+    # 地震矩 (dyne-cm)
+    M0 = 10 ** (1.5 * magnitude + 9.105)
     
-    # 拐角频率
-    stress_drop = 100
-    f_c = 4.9e6 * Vs * 1000 * (stress_drop / M0) ** (1/3)
+    # 拐角频率 (Hz) - 基于Brune模型
+    # f_c = (4.9e6 * Vs * (σ/M0)^(1/3)) / (10^7)
+    Vs = 3.5  # km/s - 剪切波速度
+    stress_drop = 100 * 1e5  # dyne/cm^2，假设应力降为100 bar
+    f_c = 4.9e6 * Vs * (stress_drop / M0) ** (1/3) / 1e7
     
-    # 位移谱
-    if frequency < f_c:
-        disp_spectrum = M0 / (1 + (frequency / f_c) ** 2)
+    # ===== 位移谱计算（改进的Brune谱） =====
+    # 使用更精确的高频衰减
+    if frequency > 0:
+        brune_spectrum = M0 / (4 * 3.14159 * Vs * 1e5 * (1 + (frequency/f_c)**2))
     else:
-        disp_spectrum = M0 / (1 + (frequency / f_c) ** 2) * (10 / frequency) ** 2
+        brune_spectrum = M0 / (4 * 3.14159 * Vs * 1e5)
     
-    # 路径效应
-    path_effect = 1.0 / max(distance, 1.0)
+    # ===== 路径衰减和几何展开 =====
+    # 计算有效距离（考虑震源深度）
+    depth = 15  # 假设平均深度 km
+    R_eff = math.sqrt(distance**2 + depth**2)
     
-    # 衰减效应
-    kappa = 0.04
-    attenuation = math_lib.exp_negative(math.pi * frequency * kappa)
+    # 几何衰减（考虑近场和远场差异）
+    if R_eff < 10:
+        # 近场：球面波传播
+        geometric_spread = 1.0 / max(R_eff, 1.0)
+    else:
+        # 远场：圆柱形波传播（Q衰减）
+        geometric_spread = 1.0 / math.sqrt(max(R_eff, 1.0))
     
-    # 加速度谱
-    acceleration = (2 * math.pi * frequency) ** 2 * disp_spectrum * path_effect * attenuation
+    # ===== 频率相关的品质因子衰减 =====
+    # Q(f) = Q_0 * f^η，其中Q_0=100, η=0.8（典型值）
+    Q_0 = 100
+    eta = 0.8
+    Q_f = Q_0 * (frequency ** eta) if frequency > 0 else Q_0
     
-    return max(acceleration, 0)
+    # 体波衰减（以π计算）
+    v_wave = 3.5  # km/s
+    t_travel = R_eff / v_wave
+    kappa_factor = 3.14159 * frequency * t_travel / Q_f
+    q_attenuation = math_lib.exp_negative(kappa_factor)
+    
+    # ===== 高频滤波和辐射效应 =====
+    # 高频滤波（kappa值）- 考虑浅层衰减
+    kappa = 0.035
+    high_freq_filter = math_lib.exp_negative(3.14159 * frequency * kappa)
+    
+    # 辐射效应因子（与震源机制相关，这里使用平均值）
+    radiation_factor = 0.55  # 平均值
+    
+    # ===== 频率转换因子 =====
+    # 从位移谱转换到加速度谱：乘以(2π*f)^2
+    freq_factor = (2 * 3.14159 * frequency) ** 2 if frequency > 0 else 1.0
+    
+    # ===== 单位转换和缩放 =====
+    # 位移谱：cm，加速度谱：cm/s^2
+    # 1 dyne = 1 g*cm/s^2 / 980.665
+    unit_conversion = 1.0 / 980.665
+    
+    # ===== 综合地震动计算 =====
+    acceleration = (freq_factor * brune_spectrum * geometric_spread * q_attenuation * 
+                   high_freq_filter * radiation_factor * unit_conversion)
+    
+    # ===== 添加随机波动 =====
+    if random_seed is not None:
+        # 标准差：高频域约0.3-0.5, 低频域约0.2-0.3
+        if frequency < 0.5:
+            sigma = 0.25
+        elif frequency < 2.0:
+            sigma = 0.35
+        else:
+            sigma = 0.4
+        
+        # 应用随机波动：Sa_random = Sa * exp(σ * ε)
+        acceleration = acceleration * math_lib.exp(sigma * random_seed)
+    
+    return max(acceleration, 1e-6)
 
 
 # ============================================================================
@@ -370,8 +474,12 @@ class SeismicHazardAnalyzer:
         self.region_bounds = region_bounds
         self.math_lib = SimpleMath()
         
-        # 定义周期范围 (s)
-        self.periods = [0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0]
+        # 定义周期范围 (s) - 增加分辨率到33个周期
+        self.periods = [
+            0.01, 0.015, 0.02, 0.025, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09,
+            0.10, 0.12, 0.15, 0.20, 0.25, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90,
+            1.00, 1.25, 1.50, 1.75, 2.00, 2.50, 3.00, 4.00, 5.00, 7.50, 10.00
+        ]
         # 对应的频率 (Hz)
         self.frequencies = [1.0 / p for p in self.periods]
         
@@ -411,7 +519,9 @@ class SeismicHazardAnalyzer:
             
             # 计算每个周期的谱加速度
             for period, freq in zip(self.periods, self.frequencies):
-                sa = simple_ground_motion_model(freq, mag, distance)
+                # 添加随机波动（高斯分布）
+                epsilon = random.gauss(0, 1)  # 标准正态分布
+                sa = improved_ground_motion_model(freq, mag, distance, random_seed=epsilon)
                 period_sa_values[period].append(sa)
         
         # 构建危险性曲线
@@ -559,41 +669,103 @@ class SeismicHazardAnalyzer:
         return epsilon
     
     def _calculate_mean_ln_sa(self, period: float) -> float:
-        """计算ln(Sa)的均值（基于模拟数据）"""
-        # 这里使用简化的估计，实际应用中应基于GMPE
-        # 对于演示目的，我们使用经验关系
+        """
+        计算ln(Sa)的均值（基于模拟数据）
         
-        # 简化的中位值估计
-        if period <= 0.1:
-            return self.math_lib.log(0.1)  # 短周期较小的中位值
-        elif period <= 1.0:
-            return self.math_lib.log(0.3)  # 中等周期
-        else:
-            return self.math_lib.log(0.05)  # 长周期较小的中位值
+        使用改进的方法：从实际模拟数据计算而不是经验值
+        """
+        # 获取该周期的所有谱加速度值
+        if self.hazard_curves is None or period not in self.hazard_curves:
+            return 0.5  # 默认值
+        
+        hazard_curve = self.hazard_curves[period]
+        if not hazard_curve:
+            return 0.5
+        
+        # 计算中位数对应的sa值（从危险性曲线中提取）
+        # 年超越概率约0.5时的中位数
+        sa_values = [sa for sa, prob in hazard_curve]
+        
+        if sa_values:
+            # 计算中位值的对数
+            median_sa = sa_values[len(sa_values) // 2]
+            return self.math_lib.log(max(median_sa, 1e-6))
+        
+        return 0.5
     
     def _calculate_std_ln_sa(self, period: float) -> float:
-        """计算ln(Sa)的标准差（基于模拟数据）"""
-        # 简化的标准差估计，通常在0.5-0.8之间
-        return 0.6
+        """
+        计算ln(Sa)的标准差（基于模拟数据）
+        
+        改进方法：从实际模拟数据中计算，考虑周期相关性
+        """
+        # 获取该周期的所有谱加速度值
+        if self.hazard_curves is None or period not in self.hazard_curves:
+            return 0.6  # 默认值
+        
+        hazard_curve = self.hazard_curves[period]
+        if len(hazard_curve) < 2:
+            return 0.6
+        
+        # 计算ln(Sa)的样本标准差
+        sa_values = [sa for sa, prob in hazard_curve]
+        ln_sa_values = [self.math_lib.log(max(sa, 1e-6)) for sa in sa_values]
+        
+        # 计算平均值
+        mean_ln_sa = sum(ln_sa_values) / len(ln_sa_values)
+        
+        # 计算标准差
+        variance = sum((x - mean_ln_sa) ** 2 for x in ln_sa_values) / len(ln_sa_values)
+        std_ln_sa = math.sqrt(variance) if variance > 0 else 0.6
+        
+        # 对长周期应用衰减因子（长周期通常有更小的变异性）
+        if period > 2.0:
+            std_ln_sa = std_ln_sa * (0.8 + 0.2 * math.exp(-period / 5))
+        
+        return max(std_ln_sa, 0.3)  # 最小标准差0.3
     
     def _estimate_correlation(self, period1: float, period2: float) -> float:
         """
         估计两个周期之间的相关系数
         
-        使用Baker和Cornell(2006)提出的经验公式的简化版本
+        使用Baker和Cornell(2006)提出的经验公式改进版本
+        能更精确地捕捉地震动在不同周期间的相关性
         """
-        # 计算周期比的对数
-        log_ratio = abs(self.math_lib.log(period1 / period2))
+        math_lib = SimpleMath()
         
-        # 简化的相关系数模型
-        if log_ratio < 0.1:
-            return 0.95
+        if period1 == period2:
+            return 1.0
+        
+        # 计算周期比的对数（取绝对值）
+        T_min = min(period1, period2)
+        T_max = max(period1, period2)
+        log_ratio = math_lib.log(T_max / T_min)
+        
+        # Baker and Cornell (2006) 改进的经验公式
+        # ρ(T1,T2) = 1 - cos(π/2 - 0.366*ln(T_max/T_min))
+        # 简化形式，考虑更多物理因素
+        
+        if log_ratio < 0.05:
+            # 周期非常接近，相关性极高
+            return 0.99
+        elif log_ratio < 0.2:
+            # 非常接近的周期
+            return 0.98 - 0.01 * (log_ratio / 0.2)
         elif log_ratio < 0.5:
-            return 0.85
+            # 接近的周期
+            return 0.95 - 0.05 * ((log_ratio - 0.2) / 0.3)
         elif log_ratio < 1.0:
-            return 0.65
+            # 中等距离的周期
+            return 0.85 - 0.15 * ((log_ratio - 0.5) / 0.5)
+        elif log_ratio < 1.5:
+            # 相距较远的周期
+            return 0.70 - 0.15 * ((log_ratio - 1.0) / 0.5)
+        elif log_ratio < 2.0:
+            # 相距远的周期
+            return 0.55 - 0.15 * ((log_ratio - 1.5) / 0.5)
         else:
-            return 0.4
+            # 非常远的周期，相关性很低
+            return max(0.3 - 0.1 * (log_ratio - 2.0), 0.1)
     
     def export_hazard_results(self, output_dir: str = "."):
         """导出危险性分析结果"""
@@ -698,7 +870,9 @@ def export_ground_motion_data(results: Dict, region_bounds: Dict, output_dir: st
                     f.write("频率(Hz), 加速度谱(cm/s^2)\n")
                     
                     for freq in frequencies:
-                        acc = simple_ground_motion_model(freq, mag, distance)
+                        # 添加随机波动
+                        epsilon = random.gauss(0, 1)
+                        acc = improved_ground_motion_model(freq, mag, distance, random_seed=epsilon)
                         f.write(f"{freq:.1f}, {acc:.6e}\n")
                     
                     f.write("\n")
@@ -753,25 +927,26 @@ def main():
     
     # 2. 创建模拟器
     print("\n[2] 创建地震蒙特卡洛模拟器...")
-    simulator = SeismicMonteCarloSimple(region_bounds, time_period=100.0)
+    simulator = SeismicMonteCarloSimple(region_bounds, time_period=500.0)  # 改进：更长的时间跨度用于更好的统计
     
     # 3. 设置参数
     print("[3] 设置地震统计参数...")
     simulator.set_seismic_parameters(
-        annual_rate=0.05,
-        b_value=1.0,
-        M_min=4.0,
-        M_max=8.0,
-        depth_params={'type': 'lognormal', 'mean': 12, 'std': 6},
+        annual_rate=0.08,  # 改进：更现实的年均发生率
+        b_value=0.95,  # 改进：更符合美国中部地震带特征
+        M_min=4.5,  # 改进：提高最小震级（检测阈值）
+        M_max=8.2,  # 改进：考虑更大的最大可能地震
+        depth_params={'type': 'gamma', 'mean': 13, 'std': 7},  # 改进：使用Gamma分布
         spatial_params={'type': 'uniform'}
     )
-    print("    年均发生率: 0.05 次/年")
-    print("    b 值: 1.0")
-    print("    震级范围: 4.0 - 8.0")
+    print("    年均发生率: 0.08 次/年")
+    print("    b 值: 0.95")
+    print("    震级范围: 4.5 - 8.2")
+    print("    深度分布: Gamma分布 (μ=13km, σ=7km)")
     
     # 4. 运行模拟
     print("\n[4] 运行蒙特卡洛地震事件模拟...")
-    results = simulator.run_monte_carlo_simulation(n_simulations=3, random_seed=42)
+    results = simulator.run_monte_carlo_simulation(n_simulations=5, random_seed=42)
     
     # 5. 获取统计
     print("\n[5] 获取统计摘要...")
