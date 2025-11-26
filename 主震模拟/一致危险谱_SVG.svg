@@ -6,7 +6,7 @@ text { font-family: Arial, sans-serif; }
 .label { font-size: 12px; }
 .tick { font-size: 10px; }
 .curve { stroke: #d62728; stroke-width: 2.5; fill: none; }
-.point { stroke: #8b0000; stroke-width: 1; fill: #d62728; }
+.point { stroke: #d62728; stroke-width: 1; fill: #d62728; opacity: 0.7; }
 </style>
 <rect width="1000" height="700" fill="white"/>
 <line x1="60" y1="640" x2="940" y2="640" stroke="black" stroke-width="2"/>
@@ -20,17 +20,12 @@ text { font-family: Arial, sans-serif; }
 <line x1="940.0" y1="640" x2="940.0" y2="645" stroke="black"/>
 <text x="940.0" y="660" text-anchor="middle" class="tick">10.00</text>
 <line x1="55" y1="685.5391622994696" x2="60" y2="685.5391622994696" stroke="black"/>
-<text x="50" y="689.5391622994696" text-anchor="end" class="tick">10^12</text>
 <line x1="55" y1="580.3908185874358" x2="60" y2="580.3908185874358" stroke="black"/>
-<text x="50" y="584.3908185874358" text-anchor="end" class="tick">10^13</text>
 <line x1="55" y1="475.2424748754019" x2="60" y2="475.2424748754019" stroke="black"/>
-<text x="50" y="479.2424748754019" text-anchor="end" class="tick">10^14</text>
 <line x1="55" y1="370.09413116336805" x2="60" y2="370.09413116336805" stroke="black"/>
-<text x="50" y="374.09413116336805" text-anchor="end" class="tick">10^15</text>
 <line x1="55" y1="264.9457874513342" x2="60" y2="264.9457874513342" stroke="black"/>
-<text x="50" y="268.9457874513342" text-anchor="end" class="tick">10^16</text>
 <line x1="55" y1="159.79744373930032" x2="60" y2="159.79744373930032" stroke="black"/>
-<text x="50" y="163.79744373930032" text-anchor="end" class="tick">10^17</text>
+<line x1="55" y1="54.64910002726651" x2="60" y2="54.64910002726651" stroke="black"/>
 <path d="M60.0,477.2353927382032 L148.30213206143452,253.61718032807556 L265.0312012718988,165.1483437120338 L353.3333333333333,171.0691903892369 L441.63546539476783,205.68242577261708 L558.3645346052322,272.15245639365355 L646.6666666666666,329.7195824538338 L734.9687987281012,390.15595931867716 L851.6978679385655,472.11988386640246 L940.0,534.8516562879662" class="curve"/>
 <circle cx="60.0" cy="477.2353927382032" r="3" class="point"/>
 <circle cx="148.30213206143452" cy="253.61718032807556" r="3" class="point"/>
@@ -42,8 +37,7 @@ text { font-family: Arial, sans-serif; }
 <circle cx="734.9687987281012" cy="390.15595931867716" r="3" class="point"/>
 <circle cx="851.6978679385655" cy="472.11988386640246" r="3" class="point"/>
 <circle cx="940.0" cy="534.8516562879662" r="3" class="point"/>
-<text x="500" y="25" text-anchor="middle" class="title">一致危险谱 (Uniform Hazard Spectrum)</text>
-<text x="500" y="45" text-anchor="middle" class="label">50年超越概率 20%</text>
+<text x="500" y="25" text-anchor="middle" class="title">一致危险谱 (50年超越概率20%)</text>
 <text x="500" y="690" text-anchor="middle" class="label">周期 (s)</text>
 <text x="20" y="350" text-anchor="middle" class="label" transform="rotate(-90 20 350)">谱加速度 (cm/s²)</text>
 </svg>
