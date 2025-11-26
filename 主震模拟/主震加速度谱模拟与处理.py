@@ -369,93 +369,122 @@ class SeismicMonteCarloSimple:
 # ============================================================================
 
 def improved_ground_motion_model(frequency: float, magnitude: float, distance: float, 
-                                 random_seed: Optional[float] = None) -> float:
+                                 depth: float = 15.0, random_seed: Optional[float] = None) -> float:
     """
-    改进的地震动预测模型（基于Boore-Joyner-Fumal经验模型的简化版本）
+    改进的地震动预测模型（基于NGA GMPE + Brune源谱）
+    参考论文：基于地震动模拟的一致危险谱和条件均值谱生成及应用_朱瑞广
     
     参数:
     - frequency: 频率 (Hz)
     - magnitude: 震级 (M)
     - distance: 震源到台站的最近距离 (km)
+    - depth: 震源深度 (km)
     - random_seed: 随机波动（单位sigma）
     """
     math_lib = SimpleMath()
     
-    # ===== 地震矩和拐角频率计算 =====
+    # ===== 一阶段：源项（源谱计算） =====
     # 地震矩 (dyne-cm)
     M0 = 10 ** (1.5 * magnitude + 9.105)
     
-    # 拐角频率 (Hz) - 基于Brune模型
-    # f_c = (4.9e6 * Vs * (σ/M0)^(1/3)) / (10^7)
+    # 应力降随震级变化（真实地球模型）
+    # 小震应力降小，大震应力降大
+    if magnitude < 5.5:
+        stress_drop = (50 + 30 * (magnitude - 4.5)) * 1e5  # dyne/cm^2
+    elif magnitude < 7.0:
+        stress_drop = (100 + 50 * (magnitude - 5.5)) * 1e5
+    else:
+        stress_drop = 150 * 1e5
+    
+    # 拐角频率 (Hz) - Brune (1970) 模型
     Vs = 3.5  # km/s - 剪切波速度
-    stress_drop = 100 * 1e5  # dyne/cm^2，假设应力降为100 bar
     f_c = 4.9e6 * Vs * (stress_drop / M0) ** (1/3) / 1e7
     
-    # ===== 位移谱计算（改进的Brune谱） =====
-    # 使用更精确的高频衰减
+    # 位移谱（Brune 1970）- 更精确的形式
     if frequency > 0:
-        brune_spectrum = M0 / (4 * 3.14159 * Vs * 1e5 * (1 + (frequency/f_c)**2))
+        disp_spectrum = M0 / (4 * math.pi * Vs * 1e5 * (1 + (frequency / f_c) ** 2))
     else:
-        brune_spectrum = M0 / (4 * 3.14159 * Vs * 1e5)
+        disp_spectrum = M0 / (4 * math.pi * Vs * 1e5)
     
-    # ===== 路径衰减和几何展开 =====
-    # 计算有效距离（考虑震源深度）
-    depth = 15  # 假设平均深度 km
-    R_eff = math.sqrt(distance**2 + depth**2)
+    # ===== 二阶段：路径衰减（基于距离和深度） =====
+    # 计算三种距离类型
+    Rrup = math.sqrt(distance ** 2 + depth ** 2)  # 最近断层距
+    Rjb = distance  # 最近水平距离
     
-    # 几何衰减（考虑近场和远场差异）
-    if R_eff < 10:
-        # 近场：球面波传播
-        geometric_spread = 1.0 / max(R_eff, 1.0)
+    # NGA-West2风格的距离衰减：分段幂律衰减
+    # 近场(< 10 km)：球面波 1/R
+    # 中距(10-70 km)：过渡 1/sqrt(R)  
+    # 远场(> 70 km)：圆柱形衰减 1/R^1.1
+    if Rrup <= 10:
+        path_decay = 1.0 / max(Rrup, 1.0)
+    elif Rrup <= 70:
+        path_decay = 1.0 / math.sqrt(Rrup)
     else:
-        # 远场：圆柱形波传播（Q衰减）
-        geometric_spread = 1.0 / math.sqrt(max(R_eff, 1.0))
+        path_decay = 1.0 / (Rrup ** 1.1)
     
-    # ===== 频率相关的品质因子衰减 =====
-    # Q(f) = Q_0 * f^η，其中Q_0=100, η=0.8（典型值）
-    Q_0 = 100
-    eta = 0.8
-    Q_f = Q_0 * (frequency ** eta) if frequency > 0 else Q_0
+    # ===== 三阶段：品质因子衰减（Q衰减） =====
+    # 更精确的Q模型：考虑地区特性
+    Q0 = 120  # 中等硬岩场地
+    eta = 0.75  # 频率依赖指数
+    Q_f = Q0 * (frequency ** eta)
     
-    # 体波衰减（以π计算）
-    v_wave = 3.5  # km/s
-    t_travel = R_eff / v_wave
-    kappa_factor = 3.14159 * frequency * t_travel / Q_f
-    q_attenuation = math_lib.exp_negative(kappa_factor)
+    # 体波衰减：t*参数方法
+    vs_path = 3.5  # km/s
+    t_star = Rrup / vs_path  # 旅行时间 (s)
+    t_star_factor = math.pi * frequency * t_star / Q_f
+    q_attenuation = math_lib.exp_negative(t_star_factor)
     
-    # ===== 高频滤波和辐射效应 =====
-    # 高频滤波（kappa值）- 考虑浅层衰减
-    kappa = 0.035
-    high_freq_filter = math_lib.exp_negative(3.14159 * frequency * kappa)
+    # ===== 四阶段：浅层衰减（kappa效应） =====
+    # 深度依赖的kappa（站点效应的一部分）
+    kappa_base = 0.030  # 基础kappa
+    kappa_depth_factor = max(0.8, 1.0 - 0.02 * depth)  # 深源减弱
+    kappa = kappa_base * kappa_depth_factor
+    kappa_filter = math_lib.exp_negative(math.pi * frequency * kappa)
     
-    # 辐射效应因子（与震源机制相关，这里使用平均值）
-    radiation_factor = 0.55  # 平均值
+    # ===== 五阶段：辐射效应和震源机制 =====
+    # 全球平均的辐射系数
+    radiation_factor = 0.55
     
-    # ===== 频率转换因子 =====
-    # 从位移谱转换到加速度谱：乘以(2π*f)^2
-    freq_factor = (2 * 3.14159 * frequency) ** 2 if frequency > 0 else 1.0
+    # ===== 六阶段：频率转换（位移→加速度） =====
+    omega = 2 * math.pi * frequency
+    freq_conversion = omega ** 2 if frequency > 0 else 1.0
     
-    # ===== 单位转换和缩放 =====
-    # 位移谱：cm，加速度谱：cm/s^2
-    # 1 dyne = 1 g*cm/s^2 / 980.665
-    unit_conversion = 1.0 / 980.665
+    # ===== 综合加速度计算 =====
+    # dyne*cm/s^2 转换为 cm/s^2 (除以980.665)
+    acceleration = (freq_conversion * disp_spectrum * path_decay * q_attenuation * 
+                   kappa_filter * radiation_factor / 980.665)
     
-    # ===== 综合地震动计算 =====
-    acceleration = (freq_factor * brune_spectrum * geometric_spread * q_attenuation * 
-                   high_freq_filter * radiation_factor * unit_conversion)
+    # ===== 深度修正因子 =====
+    # 浅源放大效应，深源减弱效应
+    if depth < 10:
+        depth_factor = 1.0 + 0.05 * (10 - depth)
+    elif depth > 20:
+        depth_factor = 1.0 - 0.02 * (depth - 20)
+    else:
+        depth_factor = 1.0
     
-    # ===== 添加随机波动 =====
+    acceleration = acceleration * depth_factor
+    
+    # ===== 随机波动（记录间变异） =====
     if random_seed is not None:
-        # 标准差：高频域约0.3-0.5, 低频域约0.2-0.3
-        if frequency < 0.5:
-            sigma = 0.25
-        elif frequency < 2.0:
-            sigma = 0.35
+        # 总标准差（包含记录间和记录内变异）
+        if magnitude < 5.0:
+            total_sigma = 0.55
+        elif magnitude < 6.5:
+            total_sigma = 0.65
         else:
-            sigma = 0.4
+            total_sigma = 0.60
         
-        # 应用随机波动：Sa_random = Sa * exp(σ * ε)
-        acceleration = acceleration * math_lib.exp(sigma * random_seed)
+        # 频率依赖的相关性调整
+        if frequency < 0.3:
+            freq_adjust = 0.9
+        elif frequency < 3.0:
+            freq_adjust = 1.0
+        else:
+            freq_adjust = 1.1
+        
+        sigma_adjusted = total_sigma * freq_adjust
+        acceleration = acceleration * math_lib.exp(sigma_adjusted * random_seed)
     
     return max(acceleration, 1e-6)
 
@@ -492,14 +521,12 @@ class SeismicHazardAnalyzer:
         """
         计算各周期的危险性曲线
         
+        方法：整合所有蒙特卡洛模拟的结果以获得更好的统计特性
+        
         返回:
         Dict[float, List[Tuple[float, float]]]: 键为周期，值为(谱加速度, 年超越概率)列表
         """
-        print("计算各周期的危险性曲线...")
-        
-        # 获取第一次模拟的数据
-        sim = self.simulation_results['simulations'][0]
-        n_events = len(sim['occurrence_times'])
+        print("计算各周期的危险性曲线（整合所有蒙特卡洛模拟）...")
         
         # 计算台站位置（研究区域中心）
         station_lon = (self.region_bounds['lon_min'] + self.region_bounds['lon_max']) / 2
@@ -508,21 +535,29 @@ class SeismicHazardAnalyzer:
         # 存储每个周期的谱加速度值
         period_sa_values = {period: [] for period in self.periods}
         
-        # 对每个事件计算反应谱
-        for event_idx in range(n_events):
-            mag = sim['magnitudes'][event_idx]
-            lon = sim['longitudes'][event_idx]
-            lat = sim['latitudes'][event_idx]
+        # 对所有模拟和所有事件计算反应谱（提高统计可靠性）
+        total_events = 0
+        for sim_idx, sim in enumerate(self.simulation_results['simulations']):
+            n_events = len(sim['occurrence_times'])
+            total_events += n_events
             
-            # 计算震源到台站的距离
-            distance = self._calculate_distance((lon, lat), (station_lon, station_lat))
-            
-            # 计算每个周期的谱加速度
-            for period, freq in zip(self.periods, self.frequencies):
-                # 添加随机波动（高斯分布）
-                epsilon = random.gauss(0, 1)  # 标准正态分布
-                sa = improved_ground_motion_model(freq, mag, distance, random_seed=epsilon)
-                period_sa_values[period].append(sa)
+            for event_idx in range(n_events):
+                mag = sim['magnitudes'][event_idx]
+                lon = sim['longitudes'][event_idx]
+                lat = sim['latitudes'][event_idx]
+                depth = sim['depths'][event_idx] if 'depths' in sim else 15.0
+                
+                # 计算震源到台站的距离
+                distance = self._calculate_distance((lon, lat), (station_lon, station_lat))
+                
+                # 计算每个周期的谱加速度
+                for period, freq in zip(self.periods, self.frequencies):
+                    # 添加随机波动（高斯分布）
+                    epsilon = random.gauss(0, 1)  # 标准正态分布
+                    sa = improved_ground_motion_model(freq, mag, distance, depth=depth, random_seed=epsilon)
+                    period_sa_values[period].append(sa)
+        
+        print(f"  处理了 {total_events} 个地震事件，整合自 {len(self.simulation_results['simulations'])} 次蒙特卡洛模拟")
         
         # 构建危险性曲线
         hazard_curves = {}
@@ -541,7 +576,7 @@ class SeismicHazardAnalyzer:
             
             for i, sa in enumerate(sorted_sa):
                 # 年超越概率 = (排名 + 1) / (总事件数 + 1) / 模拟年数
-                # 使用平均年超越概率公式
+                # 这是PSHA标准的非参数概率计算
                 annual_rate = (i + 1) / (n_total + 1) / simulation_years
                 annual_rates.append((sa, annual_rate))
             
@@ -552,11 +587,13 @@ class SeismicHazardAnalyzer:
     
     def calculate_uniform_hazard_spectrum(self, target_annual_probability: float = 0.0044) -> Dict[float, float]:
         """
-        计算一致危险谱
+        计算一致危险谱（UHS）- 改进的实现
         
         参数:
         target_annual_probability (float): 目标年超越概率
                                          50年20%超越概率对应的年超越概率 = 1 - (1-0.2)^(1/50) ≈ 0.0044
+        
+        方法：对每个周期的危险性曲线进行对数插值以获得精确的谱加速度
         
         返回:
         Dict[float, float]: 一致危险谱 {周期: 谱加速度}
@@ -569,31 +606,98 @@ class SeismicHazardAnalyzer:
         uhs = {}
         
         for period, hazard_curve in self.hazard_curves.items():
-            # 找到最接近目标概率的谱加速度
-            target_sa = None
-            min_diff = float('inf')
+            if len(hazard_curve) < 2:
+                # 数据不足，使用最接近的值
+                uhs[period] = hazard_curve[0][0] if hazard_curve else 0
+                continue
             
-            for sa, prob in hazard_curve:
-                diff = abs(prob - target_annual_probability)
-                if diff < min_diff:
-                    min_diff = diff
-                    target_sa = sa
+            # 对数插值：在ln(Sa)和ln(概率)空间中进行线性插值
+            # 这更符合地震动的实际分布特性
+            
+            # 分离Sa和概率
+            sa_values = [sa for sa, prob in hazard_curve]
+            prob_values = [prob for sa, prob in hazard_curve]
+            
+            # 在对数空间中搜索目标概率
+            target_sa = self._interpolate_sa(sa_values, prob_values, target_annual_probability)
             
             if target_sa is not None:
                 uhs[period] = target_sa
+            else:
+                # 如果插值失败，使用最接近的值
+                closest_sa = None
+                min_diff = float('inf')
+                for sa, prob in hazard_curve:
+                    diff = abs(prob - target_annual_probability)
+                    if diff < min_diff:
+                        min_diff = diff
+                        closest_sa = sa
+                uhs[period] = closest_sa if closest_sa else 0
         
         self.uhs_50yr_20p = uhs
         return uhs
     
+    def _interpolate_sa(self, sa_values: List[float], prob_values: List[float], 
+                       target_prob: float) -> Optional[float]:
+        """
+        在危险性曲线上进行对数插值以获得精确的谱加速度
+        
+        参数:
+        - sa_values: 谱加速度列表
+        - prob_values: 对应的年超越概率列表
+        - target_prob: 目标年超越概率
+        
+        返回:
+        插值得到的谱加速度，如果不在范围内则返回None
+        """
+        math_lib = SimpleMath()
+        
+        # 检查目标概率是否在范围内
+        min_prob = min(prob_values)
+        max_prob = max(prob_values)
+        
+        if target_prob < min_prob or target_prob > max_prob:
+            # 在范围外，无法插值
+            return None
+        
+        # 在对数空间中进行插值
+        # ln(Sa) - ln(概率) 空间通常更线性
+        
+        for i in range(len(sa_values) - 1):
+            prob1, prob2 = prob_values[i], prob_values[i+1]
+            sa1, sa2 = sa_values[i], sa_values[i+1]
+            
+            # 检查目标概率是否在这两个点之间
+            if (prob1 >= target_prob >= prob2) or (prob2 >= target_prob >= prob1):
+                # 在这两个点之间进行对数插值
+                if prob1 != prob2:  # 避免除以零
+                    # 线性插值（在对数空间）
+                    w = (target_prob - prob2) / (prob1 - prob2)  # 权重
+                    
+                    # 在对数空间中插值
+                    ln_sa1 = math_lib.log(max(sa1, 1e-6))
+                    ln_sa2 = math_lib.log(max(sa2, 1e-6))
+                    ln_sa_target = ln_sa2 + w * (ln_sa1 - ln_sa2)
+                    
+                    return math_lib.exp(ln_sa_target)
+                else:
+                    # 两个概率相同，返回平均值
+                    return (sa1 + sa2) / 2
+        
+        return None
+    
     def calculate_conditional_mean_spectrum(self, control_period: float = 1.0) -> Dict[float, float]:
         """
-        计算条件均值谱
+        计算条件均值谱（CMS）- Baker (2011) 改进方法
         
         参数:
         control_period (float): 控制周期 (s)，通常选择结构基本周期或UHS峰值周期
         
         返回:
         Dict[float, float]: 条件均值谱 {周期: 谱加速度}
+        
+        公式：CMS(T|Sa(T*)) = exp[μ_lnSa(T) + ρ(T,T*) * σ_lnSa(T) * ε(T*)]
+        其中ε(T*)是在目标地震动水平(UHS)下的标准正态变量
         """
         print(f"计算条件均值谱 (控制周期 = {control_period}s)...")
         
@@ -605,39 +709,154 @@ class SeismicHazardAnalyzer:
             # 找到最接近的控制周期
             closest_period = min(self.uhs_50yr_20p.keys(), 
                                key=lambda p: abs(p - control_period))
+            original_control = control_period
             control_period = closest_period
-            print(f"使用最接近的控制周期: {control_period}s")
+            print(f"使用最接近的控制周期: {control_period}s (原请求: {original_control}s)")
         
         uhs_control = self.uhs_50yr_20p[control_period]
         
         # 计算控制周期的epsilon值
-        # 这里使用简化的地震动预测方程
-        epsilon_control = self._calculate_epsilon(control_period, uhs_control)
+        # ε = [ln(Sa_UHS) - μ_lnSa(T*)] / σ_lnSa(T*)
+        epsilon_control = self._calculate_epsilon_improved(control_period, uhs_control)
         
         # 计算条件均值谱
         cms = {}
         
         for period in self.periods:
             if period == control_period:
+                # 控制周期处，条件均值等于UHS值
                 cms[period] = uhs_control
             else:
-                # 根据Baker(2011)的CMS公式
-                # CMS(T) = exp(μ_lnSa(T) + ρ(T, T*) * σ_lnSa(T) * ε(T*))
+                # 计算周期间的相关系数（使用改进的Baker-Cornell公式）
+                rho = self._estimate_correlation_improved(period, control_period)
                 
-                # 简化的相关系数估计
-                rho = self._estimate_correlation(period, control_period)
+                # 从危险性曲线中获取ln(Sa)的统计参数
+                mu_ln_sa = self._calculate_mean_ln_sa_from_hazard(period)
+                sigma_ln_sa = self._calculate_std_ln_sa_from_hazard(period)
                 
-                # 计算条件均值
-                mu_ln_sa = self._calculate_mean_ln_sa(period)
-                sigma_ln_sa = self._calculate_std_ln_sa(period)
-                
-                conditional_mean_ln_sa = mu_ln_sa + rho * sigma_ln_sa * epsilon_control
+                # Baker (2011) CMS公式
+                # CMS(T) = exp(μ_lnSa(T) + ρ(T,T*) * σ_lnSa(T) * ε(T*))
+                conditional_mean_ln_sa = (mu_ln_sa + 
+                                         rho * sigma_ln_sa * epsilon_control)
                 cms_sa = self.math_lib.exp(conditional_mean_ln_sa)
                 
                 cms[period] = cms_sa
         
         self.cms = cms
         return cms
+    
+    def _calculate_epsilon_improved(self, period: float, target_sa: float) -> float:
+        """
+        计算标准化的epsilon值（更精确的方法）
+        
+        ε = [ln(Sa_target) - μ_lnSa(T)] / σ_lnSa(T)
+        """
+        mu_ln_sa = self._calculate_mean_ln_sa_from_hazard(period)
+        sigma_ln_sa = self._calculate_std_ln_sa_from_hazard(period)
+        
+        if sigma_ln_sa <= 0 or target_sa <= 0:
+            return 0
+        
+        epsilon = (self.math_lib.log(target_sa) - mu_ln_sa) / sigma_ln_sa
+        return epsilon
+    
+    def _calculate_mean_ln_sa_from_hazard(self, period: float) -> float:
+        """
+        从危险性曲线中计算ln(Sa)的均值
+        使用加权平均方法
+        """
+        if self.hazard_curves is None or period not in self.hazard_curves:
+            return 0.5  # 默认值
+        
+        hazard_curve = self.hazard_curves[period]
+        if not hazard_curve:
+            return 0.5
+        
+        # 使用所有数据点计算加权平均
+        sa_values = [sa for sa, prob in hazard_curve]
+        ln_sa_values = [self.math_lib.log(max(sa, 1e-6)) for sa in sa_values]
+        
+        # 简单平均（或可以使用概率加权）
+        if ln_sa_values:
+            mean_ln_sa = sum(ln_sa_values) / len(ln_sa_values)
+            return mean_ln_sa
+        
+        return 0.5
+    
+    def _calculate_std_ln_sa_from_hazard(self, period: float) -> float:
+        """
+        从危险性曲线中计算ln(Sa)的标准差
+        考虑周期和震级相关性
+        """
+        if self.hazard_curves is None or period not in self.hazard_curves:
+            return 0.6  # 默认值
+        
+        hazard_curve = self.hazard_curves[period]
+        if len(hazard_curve) < 2:
+            return 0.6
+        
+        # 计算ln(Sa)的样本标准差
+        sa_values = [sa for sa, prob in hazard_curve]
+        ln_sa_values = [self.math_lib.log(max(sa, 1e-6)) for sa in sa_values]
+        
+        # 计算平均值
+        mean_ln_sa = sum(ln_sa_values) / len(ln_sa_values)
+        
+        # 计算标准差
+        variance = sum((x - mean_ln_sa) ** 2 for x in ln_sa_values) / len(ln_sa_values)
+        std_ln_sa = math.sqrt(variance) if variance > 0 else 0.6
+        
+        # 应用周期和频率依赖的调整
+        # 长周期和低频通常有更小的相对变异性
+        if period < 0.1:
+            # 超短周期：变异性较大（高频噪声影响）
+            period_adjust = 1.2
+        elif period < 0.5:
+            # 短周期
+            period_adjust = 1.0
+        elif period < 2.0:
+            # 中等周期
+            period_adjust = 0.95
+        else:
+            # 长周期：变异性减小
+            period_adjust = 0.85 + 0.15 * math.exp(-period / 5)
+        
+        std_ln_sa = std_ln_sa * period_adjust
+        
+        # 确保合理的范围
+        return max(min(std_ln_sa, 0.8), 0.25)
+    
+    def _estimate_correlation_improved(self, period1: float, period2: float) -> float:
+        """
+        改进的相关系数估计 - Baker and Cornell (2006)
+        
+        更精确地捕捉不同周期间的相关性
+        公式: ρ(T1,T2) = 1 - cos[π/2 - 0.366*ln(max(T1,T2)/min(T1,T2))]
+        """
+        if period1 == period2:
+            return 1.0
+        
+        T_min = min(period1, period2)
+        T_max = max(period1, period2)
+        
+        if T_min == 0:
+            return 0.1
+        
+        # 计算周期比的对数
+        ln_ratio = self.math_lib.log(T_max / T_min)
+        
+        # Baker and Cornell (2006) 原始公式
+        # ρ = 1 - cos(π/2 - 0.366*ln(T_max/T_min))
+        
+        angle = math.pi / 2 - 0.366 * ln_ratio
+        
+        # 确保角度在合理范围内
+        angle = max(0, min(angle, math.pi / 2))
+        
+        rho = 1.0 - math.cos(angle)
+        
+        # 确保相关系数在[0, 1]范围内
+        return max(0.0, min(1.0, rho))
     
     def _calculate_distance(self, event_location: Tuple, station_location: Tuple) -> float:
         """计算震源到台站的距离（大圆距离）"""
